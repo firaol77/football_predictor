@@ -14,8 +14,8 @@ from fetch_data import get_head_to_head
 from models import db, Match, Prediction
 
 class FootballPredictor:
-    def __init__(self, app=None):  # Add app parameter
-        self.app = app  # Store app instance
+    def __init__(self, app=None):
+        self.app = app  # Store Flask app instance for database context
         self.xgb_home = XGBRegressor()
         self.xgb_away = XGBRegressor()
         self.rf_home = RandomForestRegressor()
@@ -103,7 +103,8 @@ class FootballPredictor:
 
     def prepare_lstm_data(self, matches, n_timesteps=10):
         X, y_home, y_away = [], [], []
-        matches["date"] = pd.to_datetime(matches["date"], errors="coerce")
+        # Standardize dates by removing timezone info
+        matches["date"] = pd.to_datetime(matches["date"], errors="coerce").dt.tz_localize(None)
         teams = matches["home_team"].unique()
         for team in teams:
             team_matches = matches[(matches["home_team"] == team) | (matches["away_team"] == team)].sort_values("date")
@@ -200,6 +201,10 @@ class FootballPredictor:
                         "upset_potential": [0] * len(upcoming)
                     })
         
+        # Standardize dates to be timezone-naive before concatenation
+        matches["date"] = pd.to_datetime(matches["date"], errors="coerce").dt.tz_localize(None)
+        upcoming["date"] = pd.to_datetime(upcoming["date"], errors="coerce").dt.tz_localize(None)
+        
         X = self.prepare_features(matches, upcoming)
         lstm_X = self.prepare_lstm_data(pd.concat([matches, upcoming]), n_timesteps=10)[-len(upcoming):]
         
@@ -272,7 +277,7 @@ class FootballPredictor:
             self.train(matches)
             return
         
-        with self.app.app_context():  # Use self.app instead of app
+        with self.app.app_context():
             predictions = Prediction.query.all()
             for pred in predictions:
                 match = Match.query.filter_by(match_id=pred.match_id).first()

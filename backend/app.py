@@ -14,11 +14,18 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db.init_app(app)
 CORS(app, resources={r"/api/*": {"origins": "http://localhost:3000"}})
 
-# Pass app to FootballPredictor
 predictor = FootballPredictor(app=app)
 
 CALLS = 10
 PERIOD = 60
+
+# Error handler for all exceptions
+@app.errorhandler(Exception)
+def handle_exception(e):
+    response = jsonify({"error": str(e)})
+    response.status_code = 500
+    response.headers.add("Access-Control-Allow-Origin", "http://localhost:3000")
+    return response
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
