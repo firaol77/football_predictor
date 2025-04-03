@@ -7,6 +7,11 @@ from datetime import datetime
 import time
 from ratelimit import limits, sleep_and_retry
 from flask_cors import CORS
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///football_db.sqlite"
@@ -19,9 +24,9 @@ predictor = FootballPredictor(app=app)
 CALLS = 10
 PERIOD = 60
 
-# Error handler for all exceptions
 @app.errorhandler(Exception)
 def handle_exception(e):
+    logger.error(f"Unhandled exception: {str(e)}", exc_info=True)
     response = jsonify({"error": str(e)})
     response.status_code = 500
     response.headers.add("Access-Control-Allow-Origin", "http://localhost:3000")
@@ -49,17 +54,27 @@ LEAGUES = [
 
 @app.route("/api/leagues", methods=["GET"])
 def get_leagues():
+    logger.info("Fetching leagues")
     return jsonify([{"code": league["code"], "name": league["name"]} for league in LEAGUES])
 
 @app.route("/api/fixtures/<league>", methods=["GET"])
 def get_fixtures(league):
     if league not in [l["code"] for l in LEAGUES]:
+        logger.error(f"Invalid league code: {league}")
         return jsonify({"error": "Invalid league code"}), 400
+    
+    logger.info(f"Fetching fixtures for league: {league}")
     fixtures = fetch_upcoming_fixtures(league)
+    logger.debug(f"Fixtures fetched: {len(fixtures)} rows")
     matches = fetch_matches(league)
+    logger.debug(f"Matches fetched: {len(matches)} rows")
+    
+    logger.info("Generating predictions")
     predictions = predictor.predict(matches, fixtures)
+    logger.debug(f"Predictions generated: {len(predictions)} rows")
     
     with app.app_context():
+        logger.info("Updating database with fixtures and predictions")
         for _, row in fixtures.iterrows():
             match = Match.query.filter_by(match_id=row["match_id"]).first()
             if not match:
@@ -80,6 +95,7 @@ def get_fixtures(league):
             )
             db.session.add(pred_entry)
         db.session.commit()
+        logger.info("Database updated")
     
     return jsonify({
         "fixtures": fixtures.to_dict(orient="records"),
@@ -89,8 +105,10 @@ def get_fixtures(league):
 @app.route("/api/past_predictions/<league>", methods=["GET"])
 def get_past_predictions(league):
     if league not in [l["code"] for l in LEAGUES]:
+        logger.error(f"Invalid league code: {league}")
         return jsonify({"error": "Invalid league code"}), 400
     with app.app_context():
+        logger.info(f"Fetching past predictions for league: {league}")
         predictions = Prediction.query.filter_by(league=league).all()
         past_data = [{
             "match_id": p.match_id,
@@ -117,11 +135,13 @@ def get_past_predictions(league):
                     correct += 1
         success_rate = (correct / total * 100) if total > 0 else 0
         
+        logger.info(f"Past predictions fetched: {len(past_data)} items")
         return jsonify({"past_predictions": past_data, "success_rate": success_rate})
 
 @app.route("/api/form/<team>", methods=["GET"])
 def get_team_form(team):
     league = request.args.get("league", "PL")
+    logger.info(f"Fetching form for team: {team} in league: {league}")
     matches = fetch_matches(league)
     form = predictor.calculate_form(matches, team)
     return jsonify({"points_per_game": form[0], "goals_scored_per_game": form[1], "goals_conceded_per_game": form[2]})

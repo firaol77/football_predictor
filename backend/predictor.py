@@ -12,6 +12,10 @@ import os
 import tensorflow as tf
 from fetch_data import get_head_to_head
 from models import db, Match, Prediction
+import logging
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 class FootballPredictor:
     def __init__(self, app=None):
@@ -36,8 +40,10 @@ class FootballPredictor:
             "DED": [("Ajax", "Feyenoord"), ("PSV", "Ajax")],
             "BSA": [("Flamengo", "Fluminense"), ("Corinthians", "Palmeiras")]
         }
+        logger.info("FootballPredictor initialized")
 
     def calculate_form(self, matches, team, n=10, decay_factor=0.9):
+        logger.debug(f"Calculating form for team: {team}")
         team_matches = matches[(matches["home_team"] == team) | (matches["away_team"] == team)].sort_values("date")
         points = goals_scored = goals_conceded = 0
         weights = [decay_factor ** i for i in range(len(team_matches))]
@@ -61,6 +67,7 @@ class FootballPredictor:
         return points / total_weight, goals_scored / total_weight, goals_conceded / total_weight
 
     def get_specialness_score(self, matches, home_team, away_team, league):
+        logger.debug(f"Calculating specialness score for {home_team} vs {away_team} in {league}")
         if (home_team, away_team) in self.famous_rivalries.get(league, []) or \
            (away_team, home_team) in self.famous_rivalries.get(league, []):
             base_score = 0.8
@@ -82,6 +89,7 @@ class FootballPredictor:
         return min(base_score, 1.0)
 
     def prepare_features(self, matches, upcoming):
+        logger.info("Preparing features for prediction")
         features = []
         for _, fixture in upcoming.iterrows():
             home_team = fixture["home_team"]
@@ -102,8 +110,8 @@ class FootballPredictor:
         return np.array(features)
 
     def prepare_lstm_data(self, matches, n_timesteps=10):
+        logger.info("Preparing LSTM data")
         X, y_home, y_away = [], [], []
-        # Standardize dates by removing timezone info
         matches["date"] = pd.to_datetime(matches["date"], errors="coerce").dt.tz_localize(None)
         teams = matches["home_team"].unique()
         for team in teams:
@@ -123,8 +131,9 @@ class FootballPredictor:
         return np.array(X), np.array(y_home), np.array(y_away)
 
     def train(self, matches):
+        logger.info("Starting model training")
         if matches.empty:
-            print("No historical data available to train the model.")
+            logger.warning("No historical data available to train the model.")
             return False
         
         X = self.prepare_features(matches, matches)
@@ -134,13 +143,17 @@ class FootballPredictor:
         X_train, X_test, y_home_train, y_home_test = train_test_split(X, y_home, test_size=0.2)
         _, _, y_away_train, y_away_test = train_test_split(X, y_away, test_size=0.2)
         
+        logger.info("Training XGBoost models")
         self.xgb_home.fit(X_train, y_home_train)
         self.xgb_away.fit(X_train, y_away_train)
+        logger.info("Training Random Forest models")
         self.rf_home.fit(X_train, y_home_train)
         self.rf_away.fit(X_train, y_away_train)
+        logger.info("Training Poisson models")
         self.poisson_home.fit(X_train, y_home_train)
         self.poisson_away.fit(X_train, y_away_train)
         
+        logger.info("Training LSTM model")
         X_lstm, y_lstm_home, y_lstm_away = self.prepare_lstm_data(matches)
         self.lstm_model = Sequential([
             LSTM(50, input_shape=(10, 3), return_sequences=False),
@@ -150,6 +163,7 @@ class FootballPredictor:
         self.lstm_model.compile(optimizer="adam", loss="mean_squared_error")
         self.lstm_model.fit(X_lstm, np.column_stack((y_lstm_home, y_lstm_away)), epochs=10, batch_size=32, verbose=1)
         
+        logger.info("Saving trained models")
         joblib.dump({
             "xgb_home": self.xgb_home, "xgb_away": self.xgb_away,
             "rf_home": self.rf_home, "rf_away": self.rf_away,
@@ -164,15 +178,17 @@ class FootballPredictor:
         ]:
             home_pred = model_home.predict(X_test)
             away_pred = model_away.predict(X_test)
-            print(f"{model_name} Home RMSE:", np.sqrt(mean_squared_error(y_home_test, home_pred)))
-            print(f"{model_name} Away RMSE:", np.sqrt(mean_squared_error(y_away_test, away_pred)))
+            logger.info(f"{model_name} Home RMSE: {np.sqrt(mean_squared_error(y_home_test, home_pred))}")
+            logger.info(f"{model_name} Away RMSE: {np.sqrt(mean_squared_error(y_away_test, away_pred))}")
         return True
 
     def predict(self, matches, upcoming):
+        logger.info("Starting prediction process")
         if not os.path.exists(self.model_path) or not os.path.exists("lstm_model.h5"):
-            print("No pre-trained model found. Training with historical data...")
+            logger.info("No pre-trained model found. Training with historical data...")
             success = self.train(matches)
             if not success:
+                logger.warning("Training failed, returning default predictions")
                 return pd.DataFrame({
                     "match_id": upcoming["match_id"],
                     "predicted_home_goals": [0] * len(upcoming),
@@ -182,16 +198,19 @@ class FootballPredictor:
                     "upset_potential": [0] * len(upcoming)
                 })
         else:
+            logger.info("Loading pre-trained models")
             models = joblib.load(self.model_path)
             self.xgb_home, self.xgb_away = models["xgb_home"], models["xgb_away"]
             self.rf_home, self.rf_away = models["rf_home"], models["rf_away"]
             self.poisson_home, self.poisson_away = models["poisson_home"], models["poisson_away"]
             try:
                 self.lstm_model = tf.keras.models.load_model("lstm_model.h5")
+                logger.info("LSTM model loaded successfully")
             except Exception as e:
-                print(f"Failed to load LSTM model: {e}. Retraining...")
+                logger.error(f"Failed to load LSTM model: {e}. Retraining...")
                 success = self.train(matches)
                 if not success:
+                    logger.warning("Retraining failed, returning default predictions")
                     return pd.DataFrame({
                         "match_id": upcoming["match_id"],
                         "predicted_home_goals": [0] * len(upcoming),
@@ -201,13 +220,16 @@ class FootballPredictor:
                         "upset_potential": [0] * len(upcoming)
                     })
         
-        # Standardize dates to be timezone-naive before concatenation
+        logger.debug(f"Matches shape: {matches.shape}, Upcoming shape: {upcoming.shape}")
         matches["date"] = pd.to_datetime(matches["date"], errors="coerce").dt.tz_localize(None)
         upcoming["date"] = pd.to_datetime(upcoming["date"], errors="coerce").dt.tz_localize(None)
         
+        logger.info("Preparing features")
         X = self.prepare_features(matches, upcoming)
+        logger.info("Preparing LSTM data")
         lstm_X = self.prepare_lstm_data(pd.concat([matches, upcoming]), n_timesteps=10)[-len(upcoming):]
         
+        logger.info("Making predictions")
         xgb_home_preds = self.xgb_home.predict(X)
         xgb_away_preds = self.xgb_away.predict(X)
         rf_home_preds = self.rf_home.predict(X)
@@ -262,6 +284,7 @@ class FootballPredictor:
             )
             reasoning.append(reason)
         
+        logger.info("Prediction process completed")
         return pd.DataFrame({
             "match_id": upcoming["match_id"],
             "predicted_home_goals": home_preds,
@@ -272,8 +295,9 @@ class FootballPredictor:
         })
 
     def update_and_retrain(self, matches):
+        logger.info("Updating and retraining model")
         if self.app is None:
-            print("No Flask app provided. Skipping database update.")
+            logger.warning("No Flask app provided. Skipping database update.")
             self.train(matches)
             return
         
