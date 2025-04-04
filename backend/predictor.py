@@ -91,22 +91,40 @@ class FootballPredictor:
     def prepare_features(self, matches, upcoming):
         logger.info("Preparing features for prediction")
         features = []
-        for _, fixture in upcoming.iterrows():
-            home_team = fixture["home_team"]
-            away_team = fixture["away_team"]
-            league = fixture.get("league", "PL")
+        for _, match in upcoming.iterrows():
+            home_team = match["home_team"]
+            away_team = match["away_team"]
+            league = match.get("league", "")
+            
+            logger.debug(f"Calculating form for team: {home_team}")
             home_form = self.calculate_form(matches, home_team)
+            logger.debug(f"Calculating form for team: {away_team}")
             away_form = self.calculate_form(matches, away_team)
-            h2h = get_head_to_head(matches, home_team, away_team)
+            
+            # Get head-to-head history
+            h2h = matches[
+                ((matches["home_team"] == home_team) & (matches["away_team"] == away_team)) |
+                ((matches["home_team"] == away_team) & (matches["away_team"] == home_team))
+            ]
+            
             h2h_goals_home = h2h[h2h["home_team"] == home_team]["home_goals"].mean() if not h2h.empty else 0
             h2h_goals_away = h2h[h2h["away_team"] == away_team]["away_goals"].mean() if not h2h.empty else 0
+            
+            logger.debug(f"Calculating specialness score for {home_team} vs {away_team} in {league}")
             special_score = self.get_specialness_score(matches, home_team, away_team, league)
-            features.append([
+            
+            # Create feature array and handle NaN values
+            feature_array = [
                 home_form[0], home_form[1], home_form[2],
                 away_form[0], away_form[1], away_form[2],
                 h2h_goals_home, h2h_goals_away,
                 special_score, 1, 0
-            ])
+            ]
+            
+            # Replace NaN values with 0 (for new teams or missing data)
+            feature_array = [0 if pd.isna(x) else x for x in feature_array]
+            features.append(feature_array)
+            
         return np.array(features)
 
     def prepare_lstm_data(self, matches, n_timesteps=10):

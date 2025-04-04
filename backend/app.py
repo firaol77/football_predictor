@@ -66,16 +66,43 @@ def get_fixtures(league):
     logger.info(f"Fetching fixtures for league: {league}")
     fixtures = fetch_upcoming_fixtures(league)
     logger.debug(f"Fixtures fetched: {len(fixtures)} rows")
+    
+    # Return only the upcoming fixtures without predictions
+    return jsonify({
+        "fixtures": fixtures.to_dict(orient="records")
+    })
+
+@app.route("/api/predict", methods=["POST"])
+def predict_matches():
+    data = request.get_json()
+    if not data or "match_ids" not in data or "league" not in data:
+        return jsonify({"error": "Missing required fields: match_ids and league"}), 400
+        
+    match_ids = data["match_ids"]
+    league = data["league"]
+    
+    if league not in [l["code"] for l in LEAGUES]:
+        logger.error(f"Invalid league code: {league}")
+        return jsonify({"error": "Invalid league code"}), 400
+    
+    logger.info(f"Fetching fixtures for league: {league}")
+    fixtures = fetch_upcoming_fixtures(league)
+    # Filter fixtures by selected match IDs
+    selected_fixtures = fixtures[fixtures["match_id"].isin(match_ids)]
+    
+    if selected_fixtures.empty:
+        return jsonify({"error": "No valid fixtures found for the provided match IDs"}), 400
+    
     matches = fetch_matches(league)
     logger.debug(f"Matches fetched: {len(matches)} rows")
     
     logger.info("Generating predictions")
-    predictions = predictor.predict(matches, fixtures)
+    predictions = predictor.predict(matches, selected_fixtures)
     logger.debug(f"Predictions generated: {len(predictions)} rows")
     
     with app.app_context():
         logger.info("Updating database with fixtures and predictions")
-        for _, row in fixtures.iterrows():
+        for _, row in selected_fixtures.iterrows():
             match = Match.query.filter_by(match_id=row["match_id"]).first()
             if not match:
                 match = Match(
@@ -98,7 +125,6 @@ def get_fixtures(league):
         logger.info("Database updated")
     
     return jsonify({
-        "fixtures": fixtures.to_dict(orient="records"),
         "predictions": predictions.to_dict(orient="records")
     })
 
